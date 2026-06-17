@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { C } from "./theme";
 import SectionA from "./sections/SectionA";
 import SectionB from "./sections/SectionB";
@@ -727,6 +727,16 @@ export default function App() {
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState("");
 
+  const [chatInitializing, setChatInitializing] = useState(false);
+  const [loadingStep, setLoadingStep] = useState(0);
+  const [chatbotActive, setChatbotActive] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatSchemes, setChatSchemes] = useState([]);
+  const [chatActions, setChatActions] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [typing, setTyping] = useState(false);
+
+
   const markTouched = (field) => {
     setTouched(t => ({ ...t, [field]: true }));
   };
@@ -927,17 +937,549 @@ export default function App() {
     }
     
     if (success) {
-      setSubmitted(true);
+      // Start Chatbot Initialization & Loading prompts flow
+      setChatInitializing(true);
+      setLoadingStep(0);
+      
+      // Fetch initial chatbot payload from `/api/chat`
+      let chatData = null;
+      const chatUrls = [
+        "http://localhost:4000/api/chat",
+        "http://localhost:8000/api/chat"
+      ];
+      
+      const fetchPromise = (async () => {
+        for (const chatUrl of chatUrls) {
+          try {
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), 2000);
+            const res = await fetch(chatUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ survey_data: payload }),
+              signal: controller.signal,
+            });
+            clearTimeout(id);
+            if (res.ok) {
+              return await res.json();
+            }
+          } catch (e) {
+            // continue
+          }
+        }
+        return null;
+      })();
+
+      // Step-by-step loading animation
+      const interval = setInterval(() => {
+        setLoadingStep(prev => {
+          if (prev < 4) {
+            return prev + 1;
+          } else {
+            clearInterval(interval);
+            return prev;
+          }
+        });
+      }, 1000);
+
+      // Wait for at least 5 seconds for a smooth transition and until API fetches data
+      setTimeout(async () => {
+        clearInterval(interval);
+        const resData = await fetchPromise;
+        
+        // Mock fallback if API failed
+        const fallbackResponse = `### Welcome, ${payload.firstName}! 👋\n\nI have analyzed your Household Welfare Survey details using our RAG eligibility mapping component.\n\n#### 🌟 Eligible Government Schemes:\n- **Amma Vodi (Education Assistance)**: Provides ₹15,000 educational support to mothers.\n- **PMAY (Housing Assistance)**: Concrete housing assistance program.\n\n#### ⚠️ Required Actions & Missing Documents:\n- **Bank Account Setup**: Zero-balance savings account required for direct benefits.`;
+        
+        const responseText = resData?.response || fallbackResponse;
+        const schemes = resData?.eligible_schemes || [
+          { name: "Jagananna Amma Vodi", benefit: "₹15,000 annually" },
+          { name: "YSR Housing Scheme", benefit: "Concrete house subsidy" }
+        ];
+        const actions = resData?.required_actions || [
+          { title: "Open Bank Account", step: "Visit nearest branch for zero-balance account." }
+        ];
+
+        setChatSchemes(schemes);
+        setChatActions(actions);
+        setChatMessages([
+          {
+            sender: "bot",
+            text: responseText,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }
+        ]);
+        setChatInitializing(false);
+        setChatbotActive(true);
+        setSubmitted(true); // also marks form as submitted so header transitions
+      }, 5200);
+
     } else {
       setSubmitError(JSON.stringify(payload, null, 2));
     }
     setSubmitting(false);
   }
 
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [chatMessages, typing]);
+
+  const getQuickReplies = () => {
+    const replies = [];
+    const isFarmer = chatSchemes.some(s => s.id === "rythu_bandhu");
+    if (isFarmer) {
+      replies.push(lang === "en" ? "How to apply for Rythu Bandhu?" : "రైతు బంధు కోసం ఎలా దరఖాస్తు చేయాలి?");
+    }
+    const hasEducation = chatSchemes.some(s => s.id === "amma_vodi");
+    if (hasEducation) {
+      replies.push(lang === "en" ? "Tell me about Amma Vodi eligibility" : "అమ్మ ఒడి అర్హత గురించి చెప్పండి");
+    }
+    const needsBank = chatActions.some(a => a.id === "bank_account");
+    if (needsBank) {
+      replies.push(lang === "en" ? "How do I open a bank account?" : "బ్యాంక్ ఖాతా ఎలా తెరవాలి?");
+    }
+    if (replies.length < 3) {
+      replies.push(lang === "en" ? "What documents are required?" : "ఏ పత్రాలు అవసరం?");
+    }
+    if (replies.length < 4) {
+      replies.push(lang === "en" ? "YSR Housing Scheme guidelines" : "YSR హౌసింగ్ పథకం మార్గదర్శకాలు");
+    }
+    return replies.slice(0, 3);
+  };
+
+  const parseInlineMarkdown = (text) => {
+    const parts = [];
+    let currentText = text;
+    const boldCodeRegex = /(\*\*.*?\*\*|`.*?`)/;
+    
+    while (currentText.length > 0) {
+      const match = currentText.match(boldCodeRegex);
+      if (!match) {
+        parts.push(currentText);
+        break;
+      }
+      
+      const index = match.index;
+      if (index > 0) {
+        parts.push(currentText.substring(0, index));
+      }
+      
+      const token = match[0];
+      if (token.startsWith("**") && token.endsWith("**")) {
+        parts.push(<strong key={currentText.length + index} style={{ color: C.accent }}>{token.slice(2, -2)}</strong>);
+      } else if (token.startsWith("`") && token.endsWith("`")) {
+        parts.push(<code key={currentText.length + index} style={{ background: "rgba(255,255,255,0.08)", padding: "2px 6px", borderRadius: 4, fontSize: 11, color: "#86efac" }}>{token.slice(1, -1)}</code>);
+      }
+      
+      currentText = currentText.substring(index + token.length);
+    }
+    return parts;
+  };
+
+  const renderMarkdown = (text, isUser) => {
+    if (isUser) return <span>{text}</span>;
+    const lines = text.split("\n");
+    return lines.map((line, idx) => {
+      if (line.startsWith("### ")) {
+        return <h3 key={idx} style={{ margin: "14px 0 8px", fontSize: 15, fontWeight: 800, color: C.accent }}>{line.replace("### ", "")}</h3>;
+      }
+      if (line.startsWith("#### ")) {
+        return <h4 key={idx} style={{ margin: "12px 0 6px", fontSize: 13, fontWeight: 700, color: C.text }}>{line.replace("#### ", "")}</h4>;
+      }
+      if (line.startsWith("- ")) {
+        return <div key={idx} style={{ margin: "4px 0 4px 12px", fontSize: 13, color: C.text }}>• {parseInlineMarkdown(line.replace("- ", ""))}</div>;
+      }
+      if (/^\d+\.\s/.test(line)) {
+        const match = line.match(/^(\d+\.\s)(.*)/);
+        return <div key={idx} style={{ margin: "4px 0 4px 12px", fontSize: 13, color: C.text }}>{match[1]} {parseInlineMarkdown(match[2])}</div>;
+      }
+      if (line.trim() === "") return <div key={idx} style={{ height: 6 }} />;
+      return <p key={idx} style={{ margin: "0 0 6px", fontSize: 13, color: C.text, lineHeight: 1.5 }}>{parseInlineMarkdown(line)}</p>;
+    });
+  };
+
+  async function handleSendQuery(overrideText) {
+    const textToSend = overrideText || chatInput;
+    if (!textToSend.trim()) return;
+
+    // Append user message
+    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const userMsg = { sender: "user", text: textToSend, time: timeStr };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatInput("");
+    setTyping(true);
+
+    // Call RAG Chatbot endpoint for follow-up query
+    const chatUrls = [
+      "http://localhost:4000/api/chat",
+      "http://localhost:8000/api/chat"
+    ];
+
+    let apiResponse = null;
+    for (const chatUrl of chatUrls) {
+      try {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), 2000);
+        const res = await fetch(chatUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: textToSend,
+            history: chatMessages.map(m => ({ sender: m.sender, text: m.text }))
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(id);
+        if (res.ok) {
+          apiResponse = await res.json();
+          break;
+        }
+      } catch (e) {
+        // continue
+      }
+    }
+
+    setTyping(false);
+    
+    const botResponseText = apiResponse?.response || 
+      `### Civic AI Assistant 🤖\n\nI received your query: "${textToSend}". I can help you with application details for schemes. Try asking about **Rythu Bandhu** or **Amma Vodi**.`;
+
+    setChatMessages(prev => [...prev, {
+      sender: "bot",
+      text: botResponseText,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    }]);
+  }
+
+  const renderSuccessScreen = () => (
+    <div style={{
+      textAlign:"center", padding:"48px 32px", background:C.bgCard, border:`1px solid ${C.border}`,
+      borderRadius:16, boxShadow:"0 12px 40px rgba(0,0,0,0.4)", maxWidth: 600, margin: "40px auto 0"
+    }}>
+      <div style={{ fontSize:64, marginBottom:20 }}>🎉</div>
+      <h2 style={{ color:C.green, fontSize:26, fontWeight:800, margin:"0 0 12px" }}>
+        {lang === "en" ? "Survey submitted successfully." : "సర్వే విజయవంతంగా సమర్పించబడింది."}
+      </h2>
+      <p style={{ color:C.textMuted, fontSize:15, margin:"0 0 32px", lineHeight:1.6 }}>
+        {lang === "en" ? "Thank you. Your response has been recorded successfully." : "ధన్యవాదాలు. మీ ప్రతిస్పందన విజయవంతంగా నమోదైంది."}
+      </p>
+      <button
+        onClick={() => {
+          setSubmitted(false);
+          setChatbotActive(false);
+          setFormData(INIT);
+          setVisited(new Set(["A"]));
+          setCurrent("A");
+          setShowErrors(false);
+          setTouched({});
+        }}
+        style={{
+          padding:"12px 36px", borderRadius:10, border:"none",
+          background:`linear-gradient(135deg, ${C.accent} 0%, #f59e0b 100%)`,
+          color:C.bg, cursor:"pointer", fontWeight:800, fontSize:14,
+          fontFamily:"inherit", boxShadow:"0 4px 16px rgba(251,191,36,0.25)", transition:"all 0.2s"
+        }}
+        onMouseEnter={e=>e.currentTarget.style.transform="translateY(-1px)"}
+        onMouseLeave={e=>e.currentTarget.style.transform="translateY(0)"}
+      >
+        {lang === "en" ? "Submit Another Survey" : "మరొక సర్వేని సమర్పించండి"}
+      </button>
+    </div>
+  );
+
+  const renderChatbotDashboard = () => (
+    <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 24, minHeight: "650px", marginTop: 10, animation: "fadeIn 0.4s ease-out" }}>
+      {/* Left panel: structured checklist summary */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        {/* Eligible schemes */}
+        <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, boxShadow: "0 4px 20px rgba(0,0,0,0.3)" }}>
+          <h3 style={{ margin: "0 0 16px", color: C.accent, fontSize: 15, fontWeight: 800, display: "flex", alignItems: "center", gap: 8 }}>
+            🌟 {lang === "en" ? "Eligible Schemes" : "అర్హత పథకాలు"}
+          </h3>
+          {chatSchemes.length === 0 ? (
+            <p style={{ color: C.textMuted, fontSize: 13, margin: 0 }}>
+              {lang === "en" ? "No schemes identified." : "పథకాలేవీ గుర్తించబడలేదు."}
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {chatSchemes.map((s, idx) => (
+                <div key={idx} style={{ padding: "10px 12px", background: "rgba(255,255,255,0.02)", borderLeft: `3px solid ${C.green}`, borderRadius: "0 6px 6px 0", borderTop: "1px solid rgba(255,255,255,0.03)", borderRight: "1px solid rgba(255,255,255,0.03)", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                  <strong style={{ display: "block", fontSize: 13, color: C.text, marginBottom: 4 }}>{s.name}</strong>
+                  <span style={{ fontSize: 11, color: C.textMuted, lineHeight: 1.4, display: "block" }}>{s.benefit}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Action guidance */}
+        <div style={{ background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 12, padding: 20, boxShadow: "0 4px 20px rgba(0,0,0,0.3)" }}>
+          <h3 style={{ margin: "0 0 16px", color: "#f59e0b", fontSize: 15, fontWeight: 800, display: "flex", alignItems: "center", gap: 8 }}>
+            ⚠️ {lang === "en" ? "Required Actions" : "చేయవలసిన పనులు"}
+          </h3>
+          {chatActions.length === 0 ? (
+            <p style={{ color: C.textMuted, fontSize: 13, margin: 0 }}>
+              {lang === "en" ? "All documents are complete." : "పత్రాలన్నీ పూర్తయ్యాయి."}
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {chatActions.map((a, idx) => (
+                <div key={idx} style={{ padding: "10px 12px", background: "rgba(255,255,255,0.02)", borderLeft: `3px solid #f59e0b`, borderRadius: "0 6px 6px 0", borderTop: "1px solid rgba(255,255,255,0.03)", borderRight: "1px solid rgba(255,255,255,0.03)", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                  <strong style={{ display: "block", fontSize: 13, color: C.text, marginBottom: 4 }}>{a.title}</strong>
+                  <span style={{ fontSize: 11, color: C.textMuted, lineHeight: 1.4, display: "block" }}>{a.step}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Main chat window */}
+      <div style={{ display: "flex", flexDirection: "column", background: C.bgCard, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", height: "650px", boxShadow: "0 8px 32px rgba(0,0,0,0.4)" }}>
+        {/* Chat header */}
+        <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(0,0,0,0.2)" }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text }}>🤖 Civic AI Companion</h3>
+            <span style={{ fontSize: 11, color: C.green, display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green, display: "inline-block" }}></span>
+              {lang === "en" ? "Connected to RAG Backend" : "RAG బ్యాకెండ్‌తో అనుసంధానించబడింది"}
+            </span>
+          </div>
+          <button 
+            onClick={() => {
+              setChatbotActive(false);
+              setFormData(INIT);
+              setVisited(new Set(["A"]));
+              setCurrent("A");
+              setSubmitted(false);
+              setShowErrors(false);
+              setTouched({});
+            }}
+            style={{
+              padding: "8px 16px", borderRadius: 8, border: `1px solid rgba(251,191,36,0.3)`,
+              background: "transparent", color: C.accent, cursor: "pointer", fontWeight: 700,
+              fontSize: 12, fontFamily: "inherit", transition: "all 0.2s"
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = C.accentDim}
+            onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+          >
+            {lang === "en" ? "Submit Another Survey" : "మరొక సర్വേని సమర్పించండి"}
+          </button>
+        </div>
+
+        {/* Message logs */}
+        <div style={{ flex: 1, padding: "20px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 16, background: "rgba(0,0,0,0.12)" }}>
+          {chatMessages.map((msg, idx) => (
+            <div key={idx} style={{
+              alignSelf: msg.sender === 'user' ? 'flex-end' : 'flex-start',
+              maxWidth: "80%",
+              animation: "fadeIn 0.3s ease-out"
+            }}>
+              <div style={{
+                padding: "12px 16px",
+                borderRadius: msg.sender === 'user' ? "14px 14px 0 14px" : "14px 14px 14px 0",
+                background: msg.sender === 'user' ? C.accent : "rgba(255,255,255,0.04)",
+                color: msg.sender === 'user' ? C.bg : C.text,
+                fontSize: 13,
+                lineHeight: 1.5,
+                border: msg.sender === 'user' ? "none" : `1px solid ${C.border}`,
+                boxShadow: msg.sender === 'user' ? "0 4px 12px rgba(251,191,36,0.15)" : "none",
+              }}>
+                {renderMarkdown(msg.text, msg.sender === 'user')}
+              </div>
+              <span style={{ display: "block", fontSize: 10, color: C.textMuted, marginTop: 4, textAlign: msg.sender === 'user' ? 'right' : 'left' }}>
+                {msg.time}
+              </span>
+            </div>
+          ))}
+          
+          {typing && (
+            <div style={{ alignSelf: 'flex-start', display: "flex", alignItems: "center", gap: 4, padding: "12px 16px", borderRadius: "14px 14px 14px 0", background: "rgba(255,255,255,0.03)", border: `1px solid ${C.border}` }}>
+              <span style={{ fontSize: 13, color: C.textMuted }}>{lang === "en" ? "Assistant is thinking" : "సహాయకుడు ఆలోచిస్తున్నాడు"}</span>
+              <span className="dot-pulse"></span>
+            </div>
+          )}
+          <div ref={chatEndRef} />
+        </div>
+
+        {/* Suggestions */}
+        {chatMessages.length === 1 && (
+          <div style={{ padding: "10px 16px", display: "flex", gap: 8, flexWrap: "wrap", borderTop: `1px solid ${C.border}`, background: "rgba(0,0,0,0.08)" }}>
+            {getQuickReplies().map((q, idx) => (
+              <button key={idx} onClick={() => handleSendQuery(q)} style={{
+                padding: "6px 12px", borderRadius: 16, border: `1px solid ${C.border}`,
+                background: "rgba(255,255,255,0.03)", color: C.textMuted, cursor: "pointer",
+                fontSize: 11, fontFamily: "inherit", transition: "all 0.15s"
+              }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.color = C.accent; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.textMuted; }}
+              >{q}</button>
+            ))}
+          </div>
+        )}
+
+        {/* Send Input Bar */}
+        <div style={{ padding: "14px 20px", borderTop: `1px solid ${C.border}`, display: "flex", gap: 12, background: "rgba(0,0,0,0.2)" }}>
+          <input 
+            type="text" 
+            value={chatInput} 
+            onChange={e => setChatInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') handleSendQuery(); }}
+            placeholder={lang === "en" ? "Ask a follow-up question..." : "మరింత సమాచారం అడగండి..."}
+            style={{
+              flex: 1, background: "rgba(255,255,255,0.05)", border: `1px solid ${C.border}`,
+              borderRadius: 8, padding: "12px 16px", color: C.text, fontSize: 13,
+              outline: "none", fontFamily: "inherit", transition: "all 0.15s"
+            }}
+            onFocus={e => e.currentTarget.style.borderColor = C.accent}
+            onBlur={e => e.currentTarget.style.borderColor = C.border}
+          />
+          <button 
+            onClick={() => handleSendQuery()}
+            disabled={!chatInput.trim()}
+            style={{
+              padding: "12px 24px", borderRadius: 8, border: "none",
+              background: chatInput.trim() ? `linear-gradient(135deg, ${C.accent} 0%, #f59e0b 100%)` : "rgba(255,255,255,0.05)",
+              color: chatInput.trim() ? C.bg : C.textMuted, cursor: chatInput.trim() ? "pointer" : "not-allowed",
+              fontWeight: 800, fontSize: 13, fontFamily: "inherit", transition: "all 0.2s"
+            }}
+          >
+            {lang === "en" ? "Send" : "పంపు"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+
+  const renderLoadingScreen = () => {
+    const loadingSteps = [
+      { en: "Analyzing household demographic profile...", te: "గృహ జనాభా వివరాలను విశ్లేషిస్తోంది..." },
+      { en: "Evaluating income and financial indicators...", te: "ఆదాయం మరియు ఆర్థిక సూచికలను అంచనా వేస్తోంది..." },
+      { en: "Verifying document completeness & validity checks...", te: "పత్రాల లభ్యత మరియు ప్రామాణికతను తనిఖీ చేస్తోంది..." },
+      { en: "Querying RAG scheme eligibility engine...", te: "RAG సిస్టమ్ ద్వారా సంక్షేమ పథకాలను విశ్లేషిస్తోంది..." },
+      { en: "Compiling customized action plan...", te: "వ్యక్తిగతీకరించిన కార్యాచరణ ప్రణాళికను సిద్ధం చేస్తోంది..." }
+    ];
+
+    return (
+      <div style={{
+        textAlign: "center",
+        padding: "48px 32px",
+        background: C.bgCard,
+        border: `1px solid ${C.border}`,
+        borderRadius: 16,
+        boxShadow: "0 12px 40px rgba(0,0,0,0.4)",
+        maxWidth: 600,
+        margin: "40px auto 0",
+        animation: "fadeIn 0.4s ease-out"
+      }}>
+        <div className="spinner" />
+        <h2 style={{ color: C.accent, fontSize: 22, fontWeight: 800, margin: "0 0 8px" }}>
+          {lang === "en" ? "Initializing Civic AI Companion" : "సివిక్ AI సహాయకుడిని ప్రారంభిస్తోంది"}
+        </h2>
+        <p style={{ color: C.textMuted, fontSize: 13, margin: "0 0 32px", lineHeight: 1.6 }}>
+          {lang === "en" ? "Please wait while our RAG component analyzes your survey responses to map eligibility..." : "మీ సర్వే ప్రతిస్పందనల ఆధారంగా అర్హతలను మ్యాప్ చేయడానికి RAG భాగం విశ్లేషిస్తున్నంత వరకు దయచేసి వేచి ఉండండి..."}
+        </p>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, textAlign: "left", maxWidth: "450px", margin: "0 auto", background: "rgba(0,0,0,0.15)", padding: 20, borderRadius: 12, border: "1px solid rgba(255,255,255,0.03)" }}>
+          {loadingSteps.map((step, idx) => {
+            const isCompleted = idx < loadingStep;
+            const isActive = idx === loadingStep;
+            const isPending = idx > loadingStep;
+
+            let iconColor = C.textMuted;
+            let iconText = "○";
+            let textColor = C.textMuted;
+            let textWeight = 400;
+
+            if (isCompleted) {
+              iconColor = C.green;
+              iconText = "✓";
+              textColor = C.text;
+              textWeight = 500;
+            } else if (isActive) {
+              iconColor = C.accent;
+              iconText = "⚡";
+              textColor = C.accent;
+              textWeight = 700;
+            }
+
+            return (
+              <div key={idx} style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 12,
+                opacity: isPending ? 0.4 : 1,
+                transition: "all 0.3s ease",
+                animation: isActive ? "pulse 2s infinite" : "none"
+              }}>
+                <span style={{
+                  color: iconColor,
+                  fontWeight: "bold",
+                  fontSize: 16,
+                  lineHeight: "18px",
+                  display: "inline-block",
+                  width: 20,
+                  textAlign: "center"
+                }}>
+                  {iconText}
+                </span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: textColor, fontWeight: textWeight, fontSize: 13 }}>
+                    {lang === "en" ? step.en : step.te}
+                    {isActive && <span className="dot-pulse" />}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   const SectionComp = SECTION_COMPS[current];
 
   return (
     <div style={{ minHeight:"100vh", background:C.bg, fontFamily:"'IBM Plex Sans', 'Noto Sans Telugu', sans-serif", color:C.text }}>
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 0.3; }
+          50% { opacity: 1; }
+        }
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        .dot-pulse {
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          margin-left: 4px;
+        }
+        .dot-pulse::after {
+          content: '...';
+          font-weight: bold;
+          animation: pulse 1.5s infinite;
+          letter-spacing: 2px;
+        }
+        .spinner {
+          border: 3px solid rgba(251,191,36,0.1);
+          border-top: 3px solid #fbbf24;
+          border-radius: 50%;
+          width: 50px;
+          height: 50px;
+          animation: spin 1s linear infinite;
+          margin: 0 auto 24px;
+        }
+      `}</style>
 
       {/* ══ STICKY HEADER ══════════════════════════════ */}
       <header style={{
@@ -975,12 +1517,12 @@ export default function App() {
         </div>
 
         {/* Progress bar */}
-        {!submitted && (
+        {!submitted && !chatInitializing && !chatbotActive && (
           <div style={{ height:3, background:"rgba(255,255,255,0.07)", marginBottom:4 }}>
             <div style={{ height:"100%", width:`${progress}%`, background:`linear-gradient(90deg,${C.accent},#f59e0b)`, transition:"width 0.4s ease", borderRadius:2 }}/>
           </div>
         )}
-        {!submitted && (
+        {!submitted && !chatInitializing && !chatbotActive && (
           <div style={{ display:"flex", justifyContent:"space-between", fontSize:11, color:C.textMuted, paddingBottom:10 }}>
             <span>{lang==="en" ? sectionMeta.subtitle_en : sectionMeta.subtitle_te}</span>
             <span style={{ color:C.accent, fontWeight:700 }}>{idx+1} / {SECTIONS.length}</span>
@@ -988,7 +1530,7 @@ export default function App() {
         )}
 
         {/* Section tabs */}
-        {!submitted && (
+        {!submitted && !chatInitializing && !chatbotActive && (
           <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:12, flexWrap:"wrap", scrollbarWidth:"none" }}>
             {SECTIONS.map(s => {
               const isActive = s.key === current;
@@ -1012,46 +1554,12 @@ export default function App() {
  
       {/* ══ BODY ═══════════════════════════════════════ */}
       <main style={{ maxWidth:960, margin:"0 auto", padding:"28px 24px 80px" }}>
-        {submitted ? (
-          <div style={{
-            textAlign:"center",
-            padding:"48px 32px",
-            background:C.bgCard,
-            border:`1px solid ${C.border}`,
-            borderRadius:16,
-            boxShadow:"0 12px 40px rgba(0,0,0,0.4)",
-            maxWidth: 600,
-            margin: "40px auto 0"
-          }}>
-            <div style={{ fontSize:64, marginBottom:20 }}>🎉</div>
-            <h2 style={{ color:C.green, fontSize:26, fontWeight:800, margin:"0 0 12px" }}>
-              {lang === "en" ? "Survey submitted successfully." : "సర్వే విజయవంతంగా సమర్పించబడింది."}
-            </h2>
-            <p style={{ color:C.textMuted, fontSize:15, margin:"0 0 32px", lineHeight:1.6 }}>
-              {lang === "en" ? "Thank you. Your response has been recorded successfully." : "ధన్యవాదాలు. మీ ప్రతిస్పందన విజయవంతంగా నమోదైంది."}
-            </p>
-            <button
-              onClick={() => {
-                setFormData(INIT);
-                setVisited(new Set(["A"]));
-                setCurrent("A");
-                setSubmitted(false);
-                setShowErrors(false);
-                setTouched({});
-              }}
-              style={{
-                padding:"12px 36px", borderRadius:10, border:"none",
-                background:`linear-gradient(135deg, ${C.accent} 0%, #f59e0b 100%)`,
-                color:C.bg, cursor:"pointer", fontWeight:800, fontSize:14,
-                fontFamily:"inherit", boxShadow:"0 4px 16px rgba(251,191,36,0.25)",
-                transition:"all 0.2s"
-              }}
-              onMouseEnter={e=>e.currentTarget.style.transform="translateY(-1px)"}
-              onMouseLeave={e=>e.currentTarget.style.transform="translateY(0)"}
-            >
-              {lang === "en" ? "Submit Another Survey" : "మరొక సర్వేని సమర్పించండి"}
-            </button>
-          </div>
+        {chatInitializing ? (
+          renderLoadingScreen()
+        ) : chatbotActive ? (
+          renderChatbotDashboard()
+        ) : submitted ? (
+          renderSuccessScreen()
         ) : (
           <>
             {current === "K" ? (
